@@ -1,5 +1,5 @@
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
@@ -14,10 +14,9 @@ import {
   TouchableOpacity,
   View
 } from 'react-native';
-import PostCard from '../../components/PostCard';
+import PostCard from '../../components/PostCard'; // Changed from { PostCard } to default import
 import { Post } from '../../components/types';
 import { useAuth } from '../../contexts/AuthContext';
-import { checkUnseenStories, getFollowingStories } from '../../lib/stories';
 import { supabase } from '../../lib/supabase';
 
 type Story = {
@@ -25,138 +24,44 @@ type Story = {
   username: string;
   avatar: string;
   isYou?: boolean;
-  hasUnseenStory?: boolean;
-  userId?: string;
-  hasActiveStory?: boolean;
 };
 
 export default function HomeScreen() {
-  const { user,profile } = useAuth();
-  const router = useRouter();
+  const { user } = useAuth();
   const [posts, setPosts] = useState<Post[]>([]);
-  const [stories, setStories] = useState<Story[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  const checkUserHasActiveStory = async (userId: string) => {
-    try {
-      const { data, error } = await supabase
-        .from('stories')
-        .select('id')
-        .eq('user_id', userId)
-        .eq('is_active', true)
-        .gt('expires_at', new Date().toISOString())
-        .limit(1);
-
-      if (error) throw error;
-      return data && data.length > 0;
-    } catch (error) {
-      console.error('Error checking user stories:', error);
-      return false;
-    }
-  };
-
-  const fetchStories = async () => {
-    try {
-      // Check if current user has active stories
-      const userHasStory = await checkUserHasActiveStory(user?.id || '');
-      
-      // Start with the user's own story
-      const userStory: Story = {
-        id: user?.id || '1',
-        userId: user?.id,
-        username: 'Your Story',
-        avatar: user?.user_metadata?.avatar_url || 'https://via.placeholder.com/80',
-        isYou: true,
-        hasActiveStory: userHasStory
-      };
-
-      // Get stories from people you follow
-      const followingStories = await getFollowingStories(user?.id || '');
-      
-      // Check which stories are unseen
-      const unseenMap = await checkUnseenStories(user?.id || '');
-
-      // Transform stories data
-      const transformedStories: Story[] = [userStory];
-
-      // Group stories by user to avoid duplicates
-      const userStoriesMap = new Map();
-      
-      followingStories.forEach(story => {
-        // Skip if it's your own story (already added)
-        if (story.user_id === user?.id) return;
-
-        // If we haven't seen this user yet, add them
-        if (!userStoriesMap.has(story.user_id)) {
-          userStoriesMap.set(story.user_id, {
-            id: story.id,
-            userId: story.user_id,
-            username: story.profiles?.username || 'Unknown',
-            avatar: story.profiles?.avatar_url || 'https://via.placeholder.com/80',
-            hasUnseenStory: unseenMap[story.user_id] || false,
-            hasActiveStory: true
-          });
-        }
-      });
-
-      // Add all unique user stories
-      userStoriesMap.forEach(story => {
-        transformedStories.push(story);
-      });
-
-      setStories(transformedStories);
-    } catch (error) {
-      console.error('Error fetching stories:', error);
-      // Fallback with just user story
-      setStories([
-        { 
-          id: user?.id || '1', 
-          username: 'Your Story', 
-          avatar: user?.user_metadata?.avatar_url || 'https://via.placeholder.com/80', 
-          isYou: true,
-          hasActiveStory: false
-        }
-      ]);
-    }
-  };
+  // Mock stories data
+  const [stories, setStories] = useState<Story[]>([
+    { id: user?.id || '1', username: 'Your Story', avatar: user?.user_metadata?.avatar_url || 'https://via.placeholder.com/80', isYou: true },
+    { id: '2', username: 'restaurant1', avatar: 'https://via.placeholder.com/80' },
+    { id: '3', username: 'foodlover', avatar: 'https://via.placeholder.com/80' },
+    { id: '4', username: 'chef_special', avatar: 'https://via.placeholder.com/80' },
+    { id: '5', username: 'tastebuds', avatar: 'https://via.placeholder.com/80' },
+  ]);
 
   const fetchPosts = async () => {
     setRefreshing(true);
     try {
-      const [postsResponse] = await Promise.all([
-        supabase
-          .from('posts')
-          .select(`
+      const { data, error } = await supabase
+        .from('posts')
+        .select(`
+          *,
+          profiles:owner_id (username, avatar_url),
+          restaurants:restaurant_id (name),
+          likes:likes(count),
+          comments:comments!post_id (
             *,
-            profiles:owner_id (username, avatar_url, user_id),
-            restaurants:restaurant_id (name),
-            likes:likes(count),
-            comments:comments!post_id (
-              *,
-              profiles:user_id (username, avatar_url, user_id)
-            )
-          `)
-          .order('created_at', { ascending: false }),
-        
-        fetchStories()
-      ]);
+            profiles:user_id (username, avatar_url)
+          )
+        `)
+        .order('created_at', { ascending: false });
 
-      if (postsResponse.error) throw postsResponse.error;
-      
-      // Transform the data to match the expected Post type
-      const transformedPosts: Post[] = (postsResponse.data || []).map(post => ({
-        ...post,
-        profiles: Array.isArray(post.profiles) ? post.profiles[0] : post.profiles,
-        comments: post.comments.map((comment: any) => ({
-          ...comment,
-          profiles: Array.isArray(comment.profiles) ? comment.profiles[0] : comment.profiles
-        }))
-      }));
-      
-      setPosts(transformedPosts);
+      if (error) throw error;
+      setPosts(data || []);
     } catch (error) {
-      console.error('Error fetching data:', error);
+      console.error('Error fetching posts:', error);
     } finally {
       setRefreshing(false);
       setLoading(false);
@@ -167,8 +72,7 @@ export default function HomeScreen() {
     useCallback(() => {
       fetchPosts();
 
-      // Set up real-time subscriptions
-      const postsSubscription = supabase
+      const subscription = supabase
         .channel('posts_changes')
         .on(
           'postgres_changes',
@@ -181,41 +85,11 @@ export default function HomeScreen() {
         )
         .subscribe();
 
-      const storiesSubscription = supabase
-        .channel('stories_changes')
-        .on(
-          'postgres_changes',
-          {
-            event: '*',
-            schema: 'public',
-            table: 'stories',
-          },
-          () => fetchStories()
-        )
-        .subscribe();
-
       return () => {
-        supabase.removeChannel(postsSubscription);
-        supabase.removeChannel(storiesSubscription);
+        supabase.removeChannel(subscription);
       };
     }, [])
   );
-
-  const handleStoryPress = (story: Story) => {
-    if (story.isYou) {
-      // Check if user has active stories
-      if (story.hasActiveStory) {
-        // User has stories, navigate to view them
-        router.push(`/stories/${story.userId}`);
-      } else {
-        // User has no stories, navigate to create story screen
-        router.push('/stories/create-story');
-      }
-    } else {
-      // Navigate to view other user's story
-      router.push(`/stories/${story.userId}`);
-    }
-  };
 
   const renderHeader = () => (
     <View style={styles.header}>
@@ -231,34 +105,6 @@ export default function HomeScreen() {
     </View>
   );
 
-  const renderStoryItem = ({ item }: { item: Story }) => (
-    
-    <TouchableOpacity 
-      style={styles.storyItem} 
-      onPress={() => handleStoryPress(item)}
-    >
-      <View style={[
-        styles.storyAvatarContainer,
-        item.hasUnseenStory && styles.storyUnseen,
-        item.isYou && !item.hasActiveStory && styles.storyCreate
-      ]}>
-        <Image
-          source={{ uri: profile?.avatar_url || 'https://via.placeholder.com/32' }}
-          style={styles.storyAvatar}
-          defaultSource={require('../../assets/images/default-avatar.png')}
-        />
-        {item.isYou && !item.hasActiveStory && (
-          <View style={styles.addStoryIcon}>
-            <Ionicons name="add" size={16} color="white" />
-          </View>
-        )}
-      </View>
-      <Text style={styles.storyUsername} numberOfLines={1}>
-        {item.isYou ? 'Your Story' : item.username}
-      </Text>
-    </TouchableOpacity>
-  );
-
   const renderStories = () => (
     <View style={styles.storiesContainer}>
       <FlatList
@@ -266,7 +112,22 @@ export default function HomeScreen() {
         horizontal
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.storiesContent}
-        renderItem={renderStoryItem}
+        renderItem={({ item }) => (
+          <TouchableOpacity style={styles.storyItem} key={item.id}>
+            <View style={[
+              styles.storyAvatarContainer,
+              !item.isYou && styles.storyUnseen
+            ]}>
+              <Image
+                source={{ uri: item.avatar }}
+                style={styles.storyAvatar}
+              />
+            </View>
+            <Text style={styles.storyUsername} numberOfLines={1}>
+              {item.isYou ? 'Your Story' : item.username}
+            </Text>
+          </TouchableOpacity>
+        )}
         keyExtractor={(item) => item.id}
       />
     </View>
@@ -409,13 +270,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 4,
-    position: 'relative',
   },
   storyUnseen: {
     borderColor: '#007AFF',
-  },
-  storyCreate: {
-    borderColor: '#8E8E93',
   },
   storyAvatar: {
     width: 64,
@@ -429,18 +286,5 @@ const styles = StyleSheet.create({
     fontSize: 12,
     textAlign: 'center',
     width: '100%',
-  },
-  addStoryIcon: {
-    position: 'absolute',
-    bottom: 2,
-    right: 2,
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: '#007AFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: '#000',
   },
 });

@@ -44,22 +44,16 @@ export default function CreateScreen() {
     const fetchRestaurants = async () => {
       if (!user) return;
       
-      try {
-        const { data, error } = await supabase
-          .from('restaurants')
-          .select('id, name')
-          .eq('owner_id', user.id);
+      const { data, error } = await supabase
+        .from('restaurants')
+        .select('id, name')
+        .eq('owner_id', user.id);
 
-        if (error) {
-          console.error('Error fetching restaurants:', error);
-          Alert.alert('Error', 'Failed to load restaurants');
-        } else {
-          setRestaurants(data || []);
-        }
-      } catch (error) {
-        console.error('Network error fetching restaurants:', error);
-        Alert.alert('Network Error', 'Please check your internet connection');
+      if (error) {
+        console.error('Error fetching restaurants:', error);
+        Alert.alert('Error', 'Failed to load restaurants');
       }
+      setRestaurants(data || []);
     };
 
     fetchRestaurants();
@@ -100,61 +94,20 @@ export default function CreateScreen() {
 
       const networkState = await NetInfo.fetch();
       if (!networkState.isConnected) {
-        throw new Error('No internet connection. Please check your network and try again.');
+        throw new Error('No internet connection');
       }
 
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
-        throw new Error('Authentication session expired. Please log in again.');
+        throw new Error('Not authenticated');
       }
 
-      console.log('Starting image upload for URI:', uri);
-      
-      const formData = new FormData();
-      const fileExt = uri.split('.').pop()?.toLowerCase() || 'jpg';
-      const filename = `${user?.id}/${Date.now()}.${fileExt}`;
-      
-      formData.append('file', {
-        uri: uri,
-        type: `image/${fileExt === 'jpg' ? 'jpeg' : fileExt}`,
-        name: filename,
-      } as any);
-
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from('post-images')
-        .upload(filename, formData, {
-          contentType: `image/${fileExt === 'jpg' ? 'jpeg' : fileExt}`,
-          upsert: false,
-        });
-
-      if (uploadError) {
-        console.error('Supabase upload error:', uploadError);
-        return await uploadImageFallback(uri);
-      }
-
-      if (!uploadData?.path) {
-        throw new Error('No upload path returned from Supabase');
-      }
-
-      console.log('Image uploaded successfully:', uploadData.path);
-      return uploadData.path;
-      
-    } catch (error) {
-      console.error('Upload error:', error);
-      throw error;
-    }
-  };
-
-  const uploadImageFallback = async (uri: string): Promise<string> => {
-    try {
-      console.log('Using fallback upload method');
       const response = await fetch(uri);
       if (!response.ok) {
         throw new Error(`Failed to read image: ${response.status}`);
       }
 
       const blob = await response.blob();
-      console.log('Blob size:', blob.size);
       
       if (blob.size > 10 * 1024 * 1024) {
         throw new Error('Image too large (max 10MB)');
@@ -171,17 +124,17 @@ export default function CreateScreen() {
         });
 
       if (uploadError) {
-        console.error('Fallback upload error:', uploadError);
+        console.error('Supabase upload error:', uploadError);
         throw new Error(`Upload failed: ${uploadError.message}`);
       }
 
       if (!uploadData?.path) {
-        throw new Error('No upload path returned from fallback upload');
+        throw new Error('No upload path returned');
       }
 
       return uploadData.path;
     } catch (error) {
-      console.error('Fallback upload error:', error);
+      console.error('Upload error:', error);
       throw error;
     }
   };
@@ -195,69 +148,41 @@ export default function CreateScreen() {
       Alert.alert('Error', 'You must be logged in to create a post');
       return;
     }
-    if (!selectedRestaurant) {
-      Alert.alert('Error', 'Please select a restaurant to tag');
-      return;
-    }
 
     setLoading(true);
     setUploadProgress(0);
 
     try {
-      const networkState = await NetInfo.fetch();
-      if (!networkState.isConnected) {
-        throw new Error('No internet connection. Please check your network and try again.');
-      }
-
-      setUploadProgress(10);
-      console.log('Starting post creation process...');
-      
       setUploadProgress(25);
       const imagePath = await uploadImage(image);
       
-      setUploadProgress(60);
-      console.log('Image uploaded, getting public URL...');
+      setUploadProgress(75);
       
       const { data: { publicUrl }, error: urlError } = supabase.storage
         .from('post-images')
         .getPublicUrl(imagePath);
 
       if (urlError) {
-        console.error('URL error:', urlError);
         throw new Error(`Failed to get public URL: ${urlError.message}`);
       }
 
-      if (!publicUrl) {
-        throw new Error('No public URL returned');
-      }
+      setUploadProgress(90);
 
-      setUploadProgress(80);
-      console.log('Public URL obtained, creating post record...');
-
-      const postData = {
+      const { error: insertError } = await supabase.from('posts').insert({
         owner_id: user.id,
         restaurant_id: selectedRestaurant,
         image_url: publicUrl,
-        caption: caption.trim() || null,
-        location: location.trim() || null,
+        caption: caption.trim(),
+        location: location.trim(),
         aspect_ratio: aspectRatio,
         created_at: new Date().toISOString(),
-      };
-
-      console.log('Post data:', postData);
-
-      const { data: postResult, error: insertError } = await supabase
-        .from('posts')
-        .insert(postData)
-        .select();
+      });
 
       if (insertError) {
-        console.error('Insert error:', insertError);
         throw new Error(`Failed to create post: ${insertError.message}`);
       }
 
       setUploadProgress(100);
-      console.log('Post created successfully:', postResult);
 
       setImage(null);
       setCaption('');
@@ -277,15 +202,8 @@ export default function CreateScreen() {
         errorMessage = error.message;
       }
       
-      console.error('Create post error:', error);
-      
-      if (errorMessage.includes('Network request failed')) {
-        errorMessage = 'Network error. Please check your internet connection and try again.';
-      } else if (errorMessage.includes('Authentication')) {
-        errorMessage = 'Authentication error. Please log out and log back in.';
-      }
-      
       Alert.alert('Error', errorMessage);
+      console.error('Create post error:', error);
     } finally {
       setLoading(false);
     }
@@ -302,21 +220,19 @@ export default function CreateScreen() {
           <Ionicons name="close" size={24} color="#007AFF" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>New Post</Text>
-        <View style={styles.headerRight}>
-          <TouchableOpacity 
-            onPress={handleCreatePost} 
-            disabled={!image || loading || !selectedRestaurant}
-            style={styles.headerButton}
-          >
-            {loading ? (
-              <ActivityIndicator color="#007AFF" size="small" />
-            ) : (
-              <Text style={[styles.shareButton, (!image || !selectedRestaurant) && styles.disabledButton]}>
-                Share
-              </Text>
-            )}
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity 
+          onPress={handleCreatePost} 
+          disabled={!image || loading}
+          style={styles.headerButton}
+        >
+          {loading ? (
+            <ActivityIndicator color="#007AFF" size="small" />
+          ) : (
+            <Text style={[styles.shareButton, !image && styles.disabledButton]}>
+              Share
+            </Text>
+          )}
+        </TouchableOpacity>
       </View>
 
       <ScrollView 
@@ -385,13 +301,12 @@ export default function CreateScreen() {
           />
         </View>
 
-        {/* Restaurant Tagging - Now Required */}
-        {restaurants.length > 0 ? (
+        {/* Restaurant Tagging */}
+        {restaurants.length > 0 && (
           <View style={styles.section}>
             <MaterialIcons name="restaurant" size={24} color="#007AFF" />
             <View style={styles.restaurantContainer}>
-              <Text style={styles.sectionTitle}>Choose Restaurant *</Text>
-              <Text style={styles.requiredText}>Required</Text>
+              <Text style={styles.sectionTitle}>Tag Restaurant</Text>
               <ScrollView 
                 horizontal 
                 showsHorizontalScrollIndicator={false}
@@ -402,10 +317,11 @@ export default function CreateScreen() {
                     key={restaurant.id}
                     style={[
                       styles.restaurantPill,
-                      selectedRestaurant === restaurant.id && styles.selectedPill,
-                      !selectedRestaurant && styles.errorPill
+                      selectedRestaurant === restaurant.id && styles.selectedPill
                     ]}
-                    onPress={() => setSelectedRestaurant(restaurant.id)}
+                    onPress={() => setSelectedRestaurant(
+                      selectedRestaurant === restaurant.id ? null : restaurant.id
+                    )}
                   >
                     <Text style={selectedRestaurant === restaurant.id ? 
                       styles.selectedPillText : styles.pillText}>
@@ -415,13 +331,6 @@ export default function CreateScreen() {
                 ))}
               </ScrollView>
             </View>
-          </View>
-        ) : (
-          <View style={styles.section}>
-            <MaterialIcons name="warning" size={24} color="#FF3B30" />
-            <Text style={styles.errorText}>
-              You need to create a restaurant first before posting
-            </Text>
           </View>
         )}
       </ScrollView>
@@ -444,10 +353,6 @@ const styles = StyleSheet.create({
   },
   headerButton: {
     padding: 8,
-  },
-  headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
   },
   headerTitle: {
     fontWeight: '600',
@@ -560,17 +465,8 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: 16,
+    marginBottom: 12,
     color: 'white',
-  },
-  requiredText: {
-    color: '#FF3B30',
-    fontSize: 12,
-    marginBottom: 8,
-  },
-  errorText: {
-    color: '#FF3B30',
-    marginLeft: 12,
-    fontSize: 14,
   },
   restaurantScroll: {
     paddingBottom: 8,
@@ -587,9 +483,6 @@ const styles = StyleSheet.create({
   selectedPill: {
     backgroundColor: '#007AFF',
     borderColor: '#007AFF',
-  },
-  errorPill: {
-    borderColor: '#FF3B30',
   },
   pillText: {
     color: 'white',
