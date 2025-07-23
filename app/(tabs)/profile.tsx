@@ -42,6 +42,12 @@ type Review = {
   created_at: string;
 };
 
+type Restaurant = {
+  id: string;
+  name: string;
+  image_url?: string;
+};
+
 type UserRole = 'user' | 'restaurant' | 'admin' | 'owner';
 
 type Profile = {
@@ -72,6 +78,8 @@ export default function ProfileScreen() {
     following_count: 0,
     review_count: 0
   });
+  const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
+  const [selectedRestaurant, setSelectedRestaurant] = useState<Restaurant | null>(null);
   const router = useRouter();
 
   const isOwner = (profile?: Profile | null): boolean => {
@@ -81,6 +89,9 @@ export default function ProfileScreen() {
   useEffect(() => {
     if (user) {
       fetchUserData();
+      if (isOwner(profile)) {
+        fetchUserRestaurants();
+      }
     }
   }, [user]);
 
@@ -99,15 +110,41 @@ export default function ProfileScreen() {
     }
   };
 
-  const fetchUserPosts = async () => {
+  const fetchUserRestaurants = async () => {
     if (!user) return;
 
     try {
       const { data, error } = await supabase
+        .from('restaurants')
+        .select('id, name, image_url')
+        .eq('owner_id', user.id);
+
+      if (error) throw error;
+      setRestaurants(data || []);
+      if (data && data.length > 0) {
+        setSelectedRestaurant(data[0]);
+      }
+    } catch (error) {
+      console.error('Error fetching user restaurants:', error);
+    }
+  };
+
+  const fetchUserPosts = async () => {
+    if (!user) return;
+
+    try {
+      let query = supabase
         .from('posts')
         .select('*, restaurants(name)')
-        .eq('owner_id', user.id)
         .order('created_at', { ascending: false });
+
+      if (isOwner(profile) && selectedRestaurant) {
+        query = query.eq('restaurant_id', selectedRestaurant.id);
+      } else {
+        query = query.eq('owner_id', user.id);
+      }
+
+      const { data, error } = await query;
 
       if (error) throw error;
       const validatedPosts = (data || []).map(post => ({
@@ -148,16 +185,30 @@ export default function ProfileScreen() {
 
     try {
       // Get post count
-      const { count: postCount } = await supabase
+      let postCountQuery = supabase
         .from('posts')
-        .select('*', { count: 'exact', head: true })
-        .eq('owner_id', user.id);
+        .select('*', { count: 'exact', head: true });
 
-      // Get follower count (people following this user)
-      const { count: followerCount } = await supabase
+      if (isOwner(profile) && selectedRestaurant) {
+        postCountQuery = postCountQuery.eq('restaurant_id', selectedRestaurant.id);
+      } else {
+        postCountQuery = postCountQuery.eq('owner_id', user.id);
+      }
+
+      const { count: postCount } = await postCountQuery;
+
+      // Get follower count (people following this user/restaurant)
+      let followerCountQuery = supabase
         .from('follows')
-        .select('*', { count: 'exact', head: true })
-        .eq('user_id', user.id);
+        .select('*', { count: 'exact', head: true });
+
+      if (isOwner(profile) && selectedRestaurant) {
+        followerCountQuery = followerCountQuery.eq('restaurant_id', selectedRestaurant.id);
+      } else {
+        followerCountQuery = followerCountQuery.eq('user_id', user.id);
+      }
+
+      const { count: followerCount } = await followerCountQuery;
 
       // Get following count (people this user is following)
       const { count: followingCount } = await supabase
@@ -185,17 +236,59 @@ export default function ProfileScreen() {
   const handleSignOut = async () => {
     try {
       await signOut();
-      router.replace('/auth');
+      router.replace('/login');
     } catch (error) {
       console.error('Error signing out:', error);
     }
+  };
+
+  const handleDeletePost = async (postId: string) => {
+    Alert.alert(
+      'Delete Post',
+      'Are you sure you want to delete this post?',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel'
+        },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const { error } = await supabase
+                .from('posts')
+                .delete()
+                .eq('id', postId);
+
+              if (error) throw error;
+
+              setPosts(posts.filter(post => post.id !== postId));
+              setStats(prev => ({
+                ...prev,
+                post_count: prev.post_count - 1
+              }));
+              Alert.alert('Success', 'Post deleted successfully');
+            } catch (error) {
+              console.error('Error deleting post:', error);
+              Alert.alert('Error', 'Failed to delete post');
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const handleRestaurantChange = (restaurant: Restaurant) => {
+    setSelectedRestaurant(restaurant);
+    fetchUserData(); // Refetch data for the selected restaurant
   };
 
   const handleShareProfile = async () => {
     try {
       await Share.share({
         message: `Check out ${profile?.username}'s profile on our app!`,
-        url: 'https://yourapp.com/profile', // Replace with your actual app URL
+        url: 'https://yourapp.com/profile',
         title: `Share ${profile?.username}'s Profile`
       });
     } catch (error) {
@@ -279,6 +372,44 @@ export default function ProfileScreen() {
     outputRange: [1, 0.8],
     extrapolate: 'clamp',
   });
+
+  const RestaurantSelector = () => (
+    <View style={styles.restaurantSelector}>
+      <Text style={styles.restaurantSelectorLabel}>Current Restaurant:</Text>
+      <View style={styles.restaurantDropdown}>
+        {selectedRestaurant ? (
+          <Text style={styles.restaurantName}>{selectedRestaurant.name}</Text>
+        ) : (
+          <Text style={styles.restaurantName}>No restaurant selected</Text>
+        )}
+        <Ionicons name="chevron-down" size={16} color="#007AFF" />
+      </View>
+      {restaurants.length > 0 && (
+        <View style={styles.restaurantList}>
+          {restaurants.map(restaurant => (
+            <TouchableOpacity
+              key={restaurant.id}
+              style={styles.restaurantItem}
+              onPress={() => handleRestaurantChange(restaurant)}
+            >
+              <Text style={[
+                styles.restaurantItemText,
+                selectedRestaurant?.id === restaurant.id && styles.selectedRestaurantItem
+              ]}>
+                {restaurant.name}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+      <Link href="/restaurant/settings" asChild>
+        <TouchableOpacity style={styles.restaurantSettingsButton}>
+          <Ionicons name="settings-outline" size={20} color="#007AFF" />
+          <Text style={styles.restaurantSettingsText}>Restaurant Settings</Text>
+        </TouchableOpacity>
+      </Link>
+    </View>
+  );
 
   const ProfileHeader = () => (
     <View style={styles.profileHeader}>
@@ -426,6 +557,14 @@ export default function ProfileScreen() {
                 <Text style={styles.postStatText}>5</Text>
               </View>
             </View>
+            {isOwner(profile) && (
+              <TouchableOpacity 
+                style={styles.deletePostButton}
+                onPress={() => handleDeletePost(item.id)}
+              >
+                <Ionicons name="trash-outline" size={16} color="white" />
+              </TouchableOpacity>
+            )}
           </View>
         </TouchableOpacity>
       )}
@@ -548,6 +687,7 @@ export default function ProfileScreen() {
       >
         <ProfileHeader />
         <View style={styles.content}>
+          {isOwner(profile) && restaurants.length > 0 && <RestaurantSelector />}
           <StatsCard />
           <ActionButtons />
           <TabBar />
@@ -685,6 +825,68 @@ const styles = StyleSheet.create({
   content: {
     paddingHorizontal: 20,
     marginTop: -30,
+  },
+  restaurantSelector: {
+    backgroundColor: '#1C1C1E',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  restaurantSelectorLabel: {
+    color: '#8E8E93',
+    fontSize: 14,
+    marginBottom: 8,
+  },
+  restaurantDropdown: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: '#2C2C2E',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  restaurantName: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  restaurantList: {
+    marginTop: 8,
+    backgroundColor: '#2C2C2E',
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  restaurantItem: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.1)',
+  },
+  restaurantItemText: {
+    color: 'white',
+    fontSize: 16,
+  },
+  selectedRestaurantItem: {
+    color: '#007AFF',
+    fontWeight: '600',
+  },
+  restaurantSettingsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    marginTop: 12,
+  },
+  restaurantSettingsText: {
+    color: '#007AFF',
+    fontSize: 16,
+    fontWeight: '600',
   },
   statsCard: {
     backgroundColor: '#1C1C1E',
@@ -845,6 +1047,17 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 12,
     fontWeight: '600',
+  },
+  deletePostButton: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,59,48,0.8)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   reviewsList: {
     paddingBottom: 40,

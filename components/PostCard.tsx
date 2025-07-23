@@ -1,7 +1,8 @@
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import { Link, useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   Image,
   KeyboardAvoidingView,
@@ -16,174 +17,374 @@ import {
 } from 'react-native';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
-import { CommentItem, PostComment } from './CommentItem';
 
 interface Profile {
-  id: string;
+  user_id: string;
   username: string;
   avatar_url?: string;
+  role?: 'user' | 'owner';
+}
+
+interface Restaurant {
+  id: string;
+  name: string;
+  image_url?: string;
+}
+
+interface Comment {
+  id: number;
+  content: string;
+  user_id: string;
+  created_at: string;
+  profiles: Profile;
+  parent_id?: number | null;
 }
 
 interface Post {
   id: string;
-  caption: string;
+  caption?: string;
   image_url: string;
   created_at: string;
   profiles?: Profile;
-  comments?: PostComment[];
-  likes?: Array<{ count: number }>;
+  restaurant?: Restaurant;
+  restaurant_id?: string;
+  owner_id?: string;
+  likes_count?: number;
+  comments_count?: number;
+  aspect_ratio?: number;
 }
 
 interface PostCardProps {
   post: Post;
+  isInitialLoad?: boolean;
 }
 
-const PostCard: React.FC<PostCardProps> = ({ post }) => {
+const PostCard: React.FC<PostCardProps> = ({ post, isInitialLoad = false }) => {
   const { user } = useAuth();
   const router = useRouter();
+  
+  // State management
   const [isLiked, setIsLiked] = useState(false);
-  const [likeCount, setLikeCount] = useState(post.likes?.[0]?.count || 0);
+  const [likeCount, setLikeCount] = useState(post.likes_count || 0);
   const [isBookmarked, setIsBookmarked] = useState(false);
-  const [comments, setComments] = useState<PostComment[]>([]);
-  const [commentCount, setCommentCount] = useState(0);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [commentCount, setCommentCount] = useState(post.comments_count || 0);
   const [newComment, setNewComment] = useState('');
   const [showComments, setShowComments] = useState(false);
+  const [restaurantData, setRestaurantData] = useState<Restaurant | null>(null);
+  
+  // Loading states - more granular control
+  const [loadingStates, setLoadingStates] = useState({
+    likes: false,
+    bookmark: false,
+    comments: false,
+    restaurant: false,
+    addComment: false
+  });
 
-  useEffect(() => {
-    const checkLike = async () => {
-      if (!user) return;
-
-      const { data } = await supabase
-        .from('likes')
-        .select('*')
-        .eq('post_id', post.id)
-        .eq('user_id', user.id)
-        .single();
-
-      setIsLiked(!!data);
-    };
-
-    const getCommentCount = async () => {
-      const { count } = await supabase
-        .from('comments')
-        .select('*', { count: 'exact', head: true })
-        .eq('post_id', post.id);
-
-      setCommentCount(count || 0);
-    };
-
-    checkLike();
-    getCommentCount();
-  }, [user, post.id]);
-
-  const fetchComments = async () => {
-    const { data, error } = await supabase
-      .from('comments')
-      .select(`
-        id,
-        content,
-        created_at,
-        user_id,
-        post_id,
-        profiles:user_id(
-          username,
-          avatar_url
-        )
-      `)
-      .eq('post_id', post.id)
-      .order('created_at', { ascending: false });
-
-    if (!error && data) {
-      const postComments: PostComment[] = data.map((comment: any) => ({
-        id: comment.id,
-        content: comment.content,
-        created_at: comment.created_at,
-        user_id: comment.user_id,
-        post_id: comment.post_id,
-        profiles: {
-          username: comment.profiles?.username || 'Unknown User',
-          avatar_url: comment.profiles?.avatar_url || null
-        }
-      }));
-      setComments(postComments);
+  // Memoized values for better performance
+  const displayName = useMemo(() => {
+    if (post.restaurant_id) {
+      return post.restaurant?.name || restaurantData?.name || 'Restaurant';
     }
-  };
+    return post.profiles?.username || 'User';
+  }, [post.restaurant_id, post.restaurant?.name, restaurantData?.name, post.profiles?.username]);
 
-  const toggleLike = async () => {
+  const avatarUrl = useMemo(() => {
+    if (post.restaurant_id) {
+      return post.restaurant?.image_url || restaurantData?.image_url || 'https://via.placeholder.com/32';
+    }
+    return post.profiles?.avatar_url || 'https://via.placeholder.com/32';
+  }, [post.restaurant_id, post.restaurant?.image_url, restaurantData?.image_url, post.profiles?.avatar_url]);
+
+  // Optimized data fetching with batching
+  const fetchInitialData = useCallback(async () => {
     if (!user) return;
 
-    if (isLiked) {
-      const { error } = await supabase
-        .from('likes')
-        .delete()
-        .eq('post_id', post.id)
-        .eq('user_id', user.id);
+    try {
+      // Batch all initial queries
+      const promises = [];
 
-      if (!error) {
-        setIsLiked(false);
-        setLikeCount(prev => prev - 1);
+      // Check like status
+      promises.push(
+        supabase
+          .from('likes')
+          .select('id')
+          .eq('post_id', post.id)
+          .eq('user_id', user.id)
+          .maybeSingle()
+      );
+
+      // Check bookmark status
+      promises.push(
+        supabase
+          .from('bookmarks')
+          .select('id')
+          .eq('post_id', post.id)
+          .eq('user_id', user.id)
+          .maybeSingle()
+      );
+
+      // Get comment count if not provided
+      if (!post.comments_count) {
+        promises.push(
+          supabase
+            .from('comments')
+            .select('id', { count: 'exact', head: true })
+            .eq('post_id', post.id)
+        );
       }
-    } else {
-      const { error } = await supabase
-        .from('likes')
-        .insert({ post_id: post.id, user_id: user.id });
 
-      if (!error) {
-        setIsLiked(true);
-        setLikeCount(prev => prev + 1);
+      const results = await Promise.allSettled(promises);
+      
+      // Process results
+      const likeResult = results[0];
+      if (likeResult.status === 'fulfilled') {
+        setIsLiked(!!likeResult.value.data);
       }
-    }
-  };
 
-  const toggleBookmark = () => {
-    setIsBookmarked(!isBookmarked);
-  };
+      const bookmarkResult = results[1];
+      if (bookmarkResult.status === 'fulfilled') {
+        setIsBookmarked(!!bookmarkResult.value.data);
+      }
 
-  const handleAddComment = async () => {
-    if (!user || !newComment.trim()) return;
-
-    const { data, error } = await supabase
-      .from('comments')
-      .insert({
-        post_id: post.id,
-        user_id: user.id,
-        content: newComment
-      })
-      .select(`
-        id,
-        content,
-        created_at,
-        user_id,
-        post_id,
-        profiles:user_id(
-          username,
-          avatar_url
-        )
-      `)
-      .single();
-
-    if (!error && data) {
-      const newCommentData: PostComment = {
-        id: data.id,
-        content: data.content,
-        created_at: data.created_at,
-        user_id: data.user_id,
-        post_id: data.post_id,
-        profiles: {
-          username: (data as any).profiles?.username || 'Unknown User',
-          avatar_url: (data as any).profiles?.avatar_url || null
+      if (!post.comments_count && results[2]) {
+        const commentResult = results[2];
+        if (commentResult.status === 'fulfilled') {
+          setCommentCount(commentResult.value.count || 0);
         }
-      };
-      setComments([newCommentData, ...comments]);
-      setCommentCount(prev => prev + 1);
-      setNewComment('');
-    }
-  };
+      }
 
-  const openComments = async () => {
-    await fetchComments();
+    } catch (error) {
+      console.error('Error fetching initial data:', error);
+    }
+  }, [post.id, post.comments_count, user]);
+
+  // Fetch restaurant data separately and lazily
+  const fetchRestaurantData = useCallback(async () => {
+    if (!post.restaurant_id || post.restaurant || restaurantData) return;
+    
+    setLoadingStates(prev => ({ ...prev, restaurant: true }));
+    
+    try {
+      const { data, error } = await supabase
+        .from('restaurants')
+        .select('id, name, image_url')
+        .eq('id', post.restaurant_id)
+        .single();
+
+      if (!error && data) {
+        setRestaurantData(data);
+      }
+    } catch (error) {
+      console.error('Error fetching restaurant:', error);
+    } finally {
+      setLoadingStates(prev => ({ ...prev, restaurant: false }));
+    }
+  }, [post.restaurant_id, post.restaurant, restaurantData]);
+
+  // Only fetch data when component mounts, not on every render
+  useEffect(() => {
+    if (!isInitialLoad) {
+      fetchInitialData();
+    }
+    
+    // Fetch restaurant data lazily
+    if (post.restaurant_id && !post.restaurant) {
+      fetchRestaurantData();
+    }
+  }, [isInitialLoad, fetchInitialData, fetchRestaurantData]);
+
+  const navigateToProfile = useCallback(() => {
+    if (post.restaurant_id) {
+      router.push({
+        pathname: '/restaurant/profile/[id]',
+        params: { id: post.restaurant_id }
+      });
+    } else if (post.owner_id) {
+      router.push({
+        pathname: '/profile/[id]',
+        params: { id: post.owner_id }
+      });
+    }
+  }, [post.restaurant_id, post.owner_id, router]);
+
+  const toggleLike = useCallback(async () => {
+    if (!user) {
+      router.push('/login');
+      return;
+    }
+
+    if (loadingStates.likes) return;
+
+    // Optimistic update
+    const wasLiked = isLiked;
+    setIsLiked(!wasLiked);
+    setLikeCount(prev => wasLiked ? prev - 1 : prev + 1);
+    
+    setLoadingStates(prev => ({ ...prev, likes: true }));
+
+    try {
+      if (wasLiked) {
+        const { error } = await supabase
+          .from('likes')
+          .delete()
+          .eq('post_id', post.id)
+          .eq('user_id', user.id);
+
+        if (error) throw error;
+      } else {
+        const { error } = await supabase
+          .from('likes')
+          .insert({ post_id: post.id, user_id: user.id });
+
+        if (error) throw error;
+      }
+    } catch (error) {
+      // Revert optimistic update on error
+      setIsLiked(wasLiked);
+      setLikeCount(prev => wasLiked ? prev + 1 : prev - 1);
+      console.error('Error toggling like:', error);
+    } finally {
+      setLoadingStates(prev => ({ ...prev, likes: false }));
+    }
+  }, [user, isLiked, post.id, loadingStates.likes, router]);
+
+  const toggleBookmark = useCallback(async () => {
+    if (!user) {
+      router.push('/login');
+      return;
+    }
+
+    if (loadingStates.bookmark) return;
+
+    // Optimistic update
+    const wasBookmarked = isBookmarked;
+    setIsBookmarked(!wasBookmarked);
+    
+    setLoadingStates(prev => ({ ...prev, bookmark: true }));
+
+    try {
+      if (wasBookmarked) {
+        const { error } = await supabase
+          .from('bookmarks')
+          .delete()
+          .eq('post_id', post.id)
+          .eq('user_id', user.id);
+
+        if (error) throw error;
+      } else {
+        const { error } = await supabase
+          .from('bookmarks')
+          .insert({ post_id: post.id, user_id: user.id });
+
+        if (error) throw error;
+      }
+    } catch (error) {
+      // Revert optimistic update on error
+      setIsBookmarked(wasBookmarked);
+      console.error('Error toggling bookmark:', error);
+    } finally {
+      setLoadingStates(prev => ({ ...prev, bookmark: false }));
+    }
+  }, [user, isBookmarked, post.id, loadingStates.bookmark, router]);
+
+  const fetchComments = useCallback(async () => {
+    if (loadingStates.comments) return;
+    
+    setLoadingStates(prev => ({ ...prev, comments: true }));
+    
+    try {
+      const { data, error } = await supabase
+        .from('comments')
+        .select(`
+          id,
+          content,
+          created_at,
+          user_id,
+          profiles:user_id(
+            username,
+            avatar_url
+          )
+        `)
+        .eq('post_id', post.id)
+        .order('created_at', { ascending: false });
+
+      if (!error && data) {
+        setComments(data as Comment[]);
+      }
+    } catch (error) {
+      console.error('Error fetching comments:', error);
+    } finally {
+      setLoadingStates(prev => ({ ...prev, comments: false }));
+    }
+  }, [post.id, loadingStates.comments]);
+
+  const handleAddComment = useCallback(async () => {
+    if (!user || !newComment.trim() || loadingStates.addComment) {
+      if (!user) router.push('/login');
+      return;
+    }
+
+    const commentText = newComment.trim();
+    setNewComment('');
+    setLoadingStates(prev => ({ ...prev, addComment: true }));
+
+    try {
+      const { data, error } = await supabase
+        .from('comments')
+        .insert({
+          post_id: post.id,
+          user_id: user.id,
+          content: commentText
+        })
+        .select(`
+          id,
+          content,
+          created_at,
+          user_id,
+          profiles:user_id(
+            username,
+            avatar_url
+          )
+        `)
+        .single();
+
+      if (!error && data) {
+        setComments(prev => [data as Comment, ...prev]);
+        setCommentCount(prev => prev + 1);
+      }
+    } catch (error) {
+      console.error('Error adding comment:', error);
+      setNewComment(commentText); // Restore comment on error
+    } finally {
+      setLoadingStates(prev => ({ ...prev, addComment: false }));
+    }
+  }, [user, newComment, post.id, loadingStates.addComment, router]);
+
+  const openComments = useCallback(async () => {
     setShowComments(true);
-  };
+    if (comments.length === 0) {
+      await fetchComments();
+    }
+  }, [comments.length, fetchComments]);
+
+  // Don't show loading for individual posts in feed
+  if (isInitialLoad) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.skeletonHeader}>
+          <View style={styles.skeletonAvatar} />
+          <View style={styles.skeletonUserInfo}>
+            <View style={styles.skeletonUsername} />
+            <View style={styles.skeletonBadge} />
+          </View>
+        </View>
+        <View style={styles.skeletonImage} />
+        <View style={styles.skeletonActions} />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -191,13 +392,24 @@ const PostCard: React.FC<PostCardProps> = ({ post }) => {
       <View style={styles.header}>
         <TouchableOpacity 
           style={styles.userInfo}
-          onPress={() => router.push(`/restaurant/profile/${post.profiles?.id}`)}
+          onPress={navigateToProfile}
+          disabled={loadingStates.restaurant}
         >
           <Image
-            source={{ uri: post.profiles?.avatar_url || 'https://via.placeholder.com/32' }}
+            source={{ uri: avatarUrl }}
             style={styles.avatar}
           />
-          <Text style={styles.username}>{post.profiles?.username || 'Unknown User'}</Text>
+          <View>
+            <Text style={styles.username}>{displayName}</Text>
+            {post.profiles?.role === 'owner' && (
+              <View style={styles.ownerBadge}>
+                <MaterialIcons name="restaurant" size={14} color="white" />
+                <Text style={styles.ownerBadgeText}>
+                  {post.restaurant_id ? 'Restaurant' : 'Owner'}
+                </Text>
+              </View>
+            )}
+          </View>
         </TouchableOpacity>
         <TouchableOpacity>
           <MaterialIcons name="more-vert" size={24} color="white" />
@@ -209,7 +421,7 @@ const PostCard: React.FC<PostCardProps> = ({ post }) => {
         <TouchableOpacity activeOpacity={0.9}>
           <Image
             source={{ uri: post.image_url }}
-            style={styles.image}
+            style={[styles.image, { aspectRatio: post.aspect_ratio || 1 }]}
             resizeMode="cover"
           />
         </TouchableOpacity>
@@ -218,13 +430,21 @@ const PostCard: React.FC<PostCardProps> = ({ post }) => {
       {/* Action Bar */}
       <View style={styles.actionBar}>
         <View style={styles.leftActions}>
-          <TouchableOpacity onPress={toggleLike} activeOpacity={0.7}>
-            <MaterialIcons
-              name={isLiked ? 'favorite' : 'favorite-border'}
-              size={28}
-              color={isLiked ? '#ed4956' : 'white'}
-              style={styles.actionIcon}
-            />
+          <TouchableOpacity 
+            onPress={toggleLike} 
+            activeOpacity={0.7}
+            disabled={loadingStates.likes}
+          >
+            {loadingStates.likes ? (
+              <ActivityIndicator size="small" color="#ed4956" style={styles.actionIcon} />
+            ) : (
+              <MaterialIcons
+                name={isLiked ? 'favorite' : 'favorite-border'}
+                size={28}
+                color={isLiked ? '#ed4956' : 'white'}
+                style={styles.actionIcon}
+              />
+            )}
           </TouchableOpacity>
           <TouchableOpacity onPress={openComments} activeOpacity={0.7} style={styles.commentButton}>
             <MaterialIcons
@@ -245,12 +465,20 @@ const PostCard: React.FC<PostCardProps> = ({ post }) => {
             <MaterialIcons name="send" size={28} color="white" style={styles.actionIcon} />
           </TouchableOpacity>
         </View>
-        <TouchableOpacity onPress={toggleBookmark} activeOpacity={0.7}>
-          <MaterialIcons
-            name={isBookmarked ? 'bookmark' : 'bookmark-border'}
-            size={28}
-            color="white"
-          />
+        <TouchableOpacity 
+          onPress={toggleBookmark} 
+          activeOpacity={0.7}
+          disabled={loadingStates.bookmark}
+        >
+          {loadingStates.bookmark ? (
+            <ActivityIndicator size="small" color="white" />
+          ) : (
+            <MaterialIcons
+              name={isBookmarked ? 'bookmark' : 'bookmark-border'}
+              size={28}
+              color="white"
+            />
+          )}
         </TouchableOpacity>
       </View>
 
@@ -261,13 +489,11 @@ const PostCard: React.FC<PostCardProps> = ({ post }) => {
 
       {/* Caption */}
       <View style={styles.captionContainer}>
-        <Text style={styles.caption}>
-          <Text style={styles.username}>{post.profiles?.username || 'Unknown User'} </Text>
-          {post.caption}
-        </Text>
+        <Text style={styles.username}>{displayName}</Text>
+        <Text style={styles.caption}>{post.caption}</Text>
       </View>
 
-      {/* View All Comments - Only show if there are comments */}
+      {/* View All Comments */}
       {commentCount > 0 && (
         <TouchableOpacity onPress={openComments}>
           <Text style={styles.viewAllComments}>
@@ -303,13 +529,31 @@ const PostCard: React.FC<PostCardProps> = ({ post }) => {
               </TouchableOpacity>
             </View>
             
-            <FlatList
-              data={comments}
-              renderItem={({ item }) => <CommentItem comment={item} />}
-              keyExtractor={item => item.id.toString()}
-              contentContainerStyle={styles.modalContent}
-              showsVerticalScrollIndicator={false}
-            />
+            {loadingStates.comments ? (
+              <View style={styles.commentsLoading}>
+                <ActivityIndicator size="large" color="#007AFF" />
+                <Text style={styles.loadingText}>Loading comments...</Text>
+              </View>
+            ) : (
+              <FlatList
+                data={comments}
+                renderItem={({ item }) => (
+                  <View style={styles.commentItem}>
+                    <Image
+                      source={{ uri: item.profiles.avatar_url || 'https://via.placeholder.com/32' }}
+                      style={styles.commentAvatar}
+                    />
+                    <View style={styles.commentContent}>
+                      <Text style={styles.commentUsername}>{item.profiles.username}</Text>
+                      <Text style={styles.commentText}>{item.content}</Text>
+                    </View>
+                  </View>
+                )}
+                keyExtractor={item => item.id.toString()}
+                contentContainerStyle={styles.modalContent}
+                showsVerticalScrollIndicator={false}
+              />
+            )}
             
             <KeyboardAvoidingView
               behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -323,14 +567,19 @@ const PostCard: React.FC<PostCardProps> = ({ post }) => {
                   value={newComment}
                   onChangeText={setNewComment}
                   onSubmitEditing={handleAddComment}
+                  editable={!loadingStates.addComment}
                 />
                 <TouchableOpacity 
                   onPress={handleAddComment}
-                  disabled={!newComment.trim()}
+                  disabled={!newComment.trim() || loadingStates.addComment}
                 >
-                  <Text style={[styles.modalPostButton, !newComment.trim() && styles.disabledPostButton]}>
-                    Post
-                  </Text>
+                  {loadingStates.addComment ? (
+                    <ActivityIndicator size="small" color="#007AFF" />
+                  ) : (
+                    <Text style={[styles.modalPostButton, !newComment.trim() && styles.disabledPostButton]}>
+                      Post
+                    </Text>
+                  )}
                 </TouchableOpacity>
               </View>
             </KeyboardAvoidingView>
@@ -347,6 +596,44 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#2C2C2E',
+  },
+  // Skeleton loading styles
+  skeletonHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+  },
+  skeletonAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#2C2C2E',
+    marginRight: 12,
+  },
+  skeletonUserInfo: {
+    flex: 1,
+  },
+  skeletonUsername: {
+    width: 120,
+    height: 14,
+    backgroundColor: '#2C2C2E',
+    borderRadius: 4,
+    marginBottom: 4,
+  },
+  skeletonBadge: {
+    width: 80,
+    height: 12,
+    backgroundColor: '#2C2C2E',
+    borderRadius: 4,
+  },
+  skeletonImage: {
+    width: '100%',
+    height: 300,
+    backgroundColor: '#2C2C2E',
+  },
+  skeletonActions: {
+    height: 60,
+    backgroundColor: '#1C1C1E',
   },
   header: {
     flexDirection: 'row',
@@ -370,9 +657,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: 'white',
   },
+  ownerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  ownerBadgeText: {
+    fontSize: 12,
+    color: 'white',
+    marginLeft: 4,
+  },
   image: {
     width: '100%',
-    aspectRatio: 1,
     backgroundColor: '#2C2C2E',
   },
   actionBar: {
@@ -462,6 +758,41 @@ const styles = StyleSheet.create({
   },
   modalContent: {
     paddingBottom: 16,
+  },
+  commentsLoading: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 40,
+  },
+  loadingText: {
+    color: '#8E8E93',
+    marginTop: 12,
+    fontSize: 14,
+  },
+  commentItem: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 16,
+  },
+  commentAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    marginRight: 12,
+    backgroundColor: '#2C2C2E',
+  },
+  commentContent: {
+    flex: 1,
+  },
+  commentUsername: {
+    fontWeight: '600',
+    fontSize: 14,
+    color: 'white',
+    marginBottom: 4,
+  },
+  commentText: {
+    fontSize: 14,
+    color: 'white',
   },
   modalInputContainer: {
     flexDirection: 'row',

@@ -1,227 +1,269 @@
 import { Ionicons, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-    ActivityIndicator,
-    Dimensions,
-    FlatList,
-    Image,
-    Linking,
-    Platform,
-    RefreshControl,
-    ScrollView,
-    Share,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View
+  ActivityIndicator,
+  Alert,
+  Dimensions,
+  FlatList,
+  Image,
+  Linking,
+  Modal,
+  Platform,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  Share,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
-import MapView, { Marker } from 'react-native-maps';
 import { supabase } from '../../../lib/supabase';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const COVER_HEIGHT = 250;
 const AVATAR_SIZE = 100;
 
+// Types
 type Restaurant = {
   id: string;
+  owner_id: string;
   name: string;
   address: string;
   description: string;
   cuisine_type: string[];
-  phone: string;
-  website: string;
-  hours: any;
+  phone: string | null;
+  website: string | null;
+  hours: Record<string, string> | null;
   image_url: string;
-  cover_image_url: string;
-  latitude?: number;
-  longitude?: number;
+  created_at: string;
+  updated_at: string;
   average_rating?: number;
   review_count?: number;
+  profiles?: {
+    username?: string;
+    avatar_url?: string | null;
+  };
 };
 
 type Review = {
   id: string;
   user_id: string;
   user_name: string;
-  user_avatar: string;
+  user_avatar: string | null;
   rating: number;
   comment: string;
   created_at: string;
+  profiles?: {
+    username?: string;
+    avatar_url?: string | null;
+  };
 };
 
 type MenuItem = {
   id: string;
   name: string;
-  description: string;
-  price: number;
-  image_url?: string;
+  description: string | null;
+  price: string | number;
+  image_url: string | null;
 };
 
-type ProfileData = {
-  username: string;
-  avatar_url: string;
-} | null;
+type TabType = 'about' | 'reviews' | 'menu' | 'map';
 
-const RestaurantProfileScreen = () => {
-  const { id } = useLocalSearchParams();
+// Custom hooks
+const useRestaurantData = (restaurantId: string) => {
   const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
-  const [reviews, setReviews] = useState<Review[]>([]);
-  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [actualRestaurantId, setActualRestaurantId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [activeTab, setActiveTab] = useState('about');
-  const [isFollowing, setIsFollowing] = useState(false);
-  const [followersCount, setFollowersCount] = useState(0);
-  const router = useRouter();
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchRestaurantData();
-  }, [id]);
-
-  const fetchRestaurantData = async () => {
+  const fetchRestaurantData = useCallback(async (id: string) => {
     try {
       setLoading(true);
-      await Promise.all([
-        fetchRestaurantWithRating(),
-        fetchReviews(),
-        fetchMenuItems(),
-        checkIfFollowing(),
-        fetchFollowersCount()
-      ]);
-    } catch (error) {
-      console.error('Error fetching restaurant data:', error);
+      setError(null);
+      
+      // First try to fetch by restaurant ID
+      let { data, error: fetchError } = await supabase
+        .from('restaurants')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      // If not found, try to fetch by owner ID
+      if (fetchError?.code === 'PGRST116') {
+        const { data: ownerData, error: ownerError } = await supabase
+          .from('restaurants')
+          .select('*')
+          .eq('owner_id', id)
+          .single();
+
+        if (ownerError) throw ownerError;
+        data = ownerData;
+      } else if (fetchError) {
+        throw fetchError;
+      }
+
+      if (!data) {
+        throw new Error('Restaurant not found');
+      }
+
+      setActualRestaurantId(data.id);
+      setRestaurant(data);
+      return data.id;
+
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      setError(errorMessage);
+      throw err;
     } finally {
       setLoading(false);
-      setRefreshing(false);
     }
-  };
+  }, []);
 
-  const fetchRestaurantWithRating = async () => {
-    const { data, error } = await supabase
-      .from('restaurants')
-      .select(`
-        *,
-        restaurant_ratings (
-          average_rating,
-          review_count
-        )
-      `)
-      .eq('id', id)
-      .single();
+  return { restaurant, actualRestaurantId, loading, error, fetchRestaurantData, setRestaurant };
+};
 
-    if (error) throw error;
+const useReviews = () => {
+  const [reviews, setReviews] = useState<Review[]>([]);
+  const [loading, setLoading] = useState(false);
 
-    setRestaurant({
-      ...data,
-      average_rating: data.restaurant_ratings?.average_rating || 0,
-      review_count: data.restaurant_ratings?.review_count || 0
-    });
-  };
+  const fetchReviews = useCallback(async (restaurantId: string) => {
+    try {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from('reviews')
+        .select(`
+          id,
+          rating,
+          comment,
+          created_at,
+          user_id,
+          profiles:user_id(username, avatar_url)
+        `)
+        .eq('restaurant_id', restaurantId)
+        .order('created_at', { ascending: false });
 
-  const fetchReviews = async () => {
-    const { data, error } = await supabase
-      .from('reviews')
-      .select(`
-        id,
-        rating,
-        comment,
-        created_at,
-        user_id,
-        profiles:user_id (username, avatar_url)
-      `)
-      .eq('restaurant_id', id)
-      .order('created_at', { ascending: false });
+      if (error) throw error;
 
-    if (error) throw error;
-
-    const formattedReviews = data.map(review => {
-      // Handle case where profiles might be an array or object
-      let profile: ProfileData = null;
-      if (Array.isArray(review.profiles)) {
-        profile = review.profiles[0] as ProfileData;
-      } else {
-        profile = review.profiles as ProfileData;
-      }
-
-      return {
+      const formattedReviews = data?.map(review => ({
         id: review.id,
         user_id: review.user_id,
-        user_name: profile?.username || 'Anonymous',
-        user_avatar: profile?.avatar_url || '',
+        user_name: review.profiles?.username || 'Anonymous',
+        user_avatar: review.profiles?.avatar_url || null,
         rating: review.rating,
-        comment: review.comment,
+        comment: review.comment || '',
         created_at: review.created_at
-      };
-    });
+      })) || [];
 
-    setReviews(formattedReviews);
-  };
+      setReviews(formattedReviews);
 
-  const fetchMenuItems = async () => {
-    const { data, error } = await supabase
-      .from('menu_items')
-      .select('*')
-      .eq('restaurant_id', id)
-      .order('name', { ascending: true });
+      // Calculate average rating
+      const averageRating = data?.length
+        ? data.reduce((sum, review) => sum + review.rating, 0) / data.length
+        : 0;
 
-    if (error) throw error;
-    setMenuItems(data || []);
-  };
+      return { reviews: formattedReviews, averageRating, reviewCount: data?.length || 0 };
 
-  const checkIfFollowing = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    
-    if (!user) {
-      setIsFollowing(false);
-      return;
+    } catch (error) {
+      console.error('Error fetching reviews:', error);
+      setReviews([]);
+      return { reviews: [], averageRating: 0, reviewCount: 0 };
+    } finally {
+      setLoading(false);
     }
+  }, []);
 
-    const { data, error } = await supabase
-      .from('follows')
-      .select('*')
-      .eq('user_id', user.id)
-      .eq('restaurant_id', id)
-      .single();
+  return { reviews, loading, fetchReviews };
+};
 
-    if (error && error.code !== 'PGRST116') {
-      console.error('Error checking follow status:', error);
-      return;
+const useMenuItems = () => {
+  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const fetchMenuItems = useCallback(async (restaurantId: string) => {
+    try {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from('menu_items')
+        .select('*')
+        .eq('restaurant_id', restaurantId)
+        .order('name', { ascending: true });
+
+      if (error) throw error;
+
+      const processedItems = (data || []).map(item => ({
+        ...item,
+        price: typeof item.price === 'string' ? parseFloat(item.price) : item.price
+      }));
+
+      setMenuItems(processedItems);
+    } catch (error) {
+      console.error('Error fetching menu items:', error);
+      setMenuItems([]);
+    } finally {
+      setLoading(false);
     }
+  }, []);
 
-    setIsFollowing(!!data);
-  };
+  return { menuItems, loading, fetchMenuItems };
+};
 
-  const fetchFollowersCount = async () => {
-    const { count, error } = await supabase
-      .from('follows')
-      .select('*', { count: 'exact', head: true })
-      .eq('restaurant_id', id);
+const useFollowStatus = () => {
+  const [isFollowing, setIsFollowing] = useState(false);
+  const [followersCount, setFollowersCount] = useState(0);
 
-    if (error) {
-      console.error('Error fetching followers count:', error);
-      return;
-    }
-
-    setFollowersCount(count || 0);
-  };
-
-  const handleFollow = async () => {
+  const checkIfFollowing = useCallback(async (restaurantId: string) => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      
       if (!user) {
-        router.push('/login');
+        setIsFollowing(false);
         return;
       }
+
+      const { data, error } = await supabase
+        .from('follows')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('restaurant_id', restaurantId)
+        .maybeSingle();
+
+      if (error) throw error;
+      setIsFollowing(!!data);
+    } catch (error) {
+      console.error('Error checking follow status:', error);
+      setIsFollowing(false);
+    }
+  }, []);
+
+  const fetchFollowersCount = useCallback(async (restaurantId: string) => {
+    try {
+      const { count, error } = await supabase
+        .from('follows')
+        .select('*', { count: 'exact', head: true })
+        .eq('restaurant_id', restaurantId);
+
+      if (error) throw error;
+      setFollowersCount(count || 0);
+    } catch (error) {
+      console.error('Error fetching followers count:', error);
+      setFollowersCount(0);
+    }
+  }, []);
+
+  const toggleFollow = useCallback(async (restaurantId: string) => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return false;
 
       if (isFollowing) {
         const { error } = await supabase
           .from('follows')
           .delete()
           .eq('user_id', user.id)
-          .eq('restaurant_id', id);
+          .eq('restaurant_id', restaurantId);
 
         if (error) throw error;
         setIsFollowing(false);
@@ -231,19 +273,188 @@ const RestaurantProfileScreen = () => {
           .from('follows')
           .insert({
             user_id: user.id,
-            restaurant_id: id
+            restaurant_id: restaurantId
           });
 
         if (error) throw error;
         setIsFollowing(true);
         setFollowersCount(prev => prev + 1);
       }
+      return true;
     } catch (error) {
-      console.error('Error following restaurant:', error);
+      console.error('Error toggling follow:', error);
+      return false;
     }
-  };
+  }, [isFollowing]);
 
-  const handleShare = async () => {
+  return { isFollowing, followersCount, checkIfFollowing, fetchFollowersCount, toggleFollow };
+};
+
+// Components
+const RatingStars = React.memo(({ 
+  rating, 
+  size = 16, 
+  interactive = false, 
+  onPress 
+}: {
+  rating: number;
+  size?: number;
+  interactive?: boolean;
+  onPress?: (rating: number) => void;
+}) => (
+  <View style={[styles.ratingContainer, { gap: size / 4 }]}>
+    {[1, 2, 3, 4, 5].map((star) => (
+      <TouchableOpacity 
+        key={star} 
+        onPress={interactive ? () => onPress?.(star) : undefined}
+        activeOpacity={interactive ? 0.7 : 1}
+      >
+        <Ionicons
+          name={star <= rating ? 'star' : 'star-outline'}
+          size={size}
+          color={star <= rating ? '#FFD700' : '#CCCCCC'}
+        />
+      </TouchableOpacity>
+    ))}
+  </View>
+));
+
+const ReviewItem = React.memo(({ item }: { item: Review }) => (
+  <View style={styles.reviewItem}>
+    <View style={styles.reviewHeader}>
+      {item.user_avatar ? (
+        <Image source={{ uri: item.user_avatar }} style={styles.reviewerAvatar} />
+      ) : (
+        <View style={[styles.reviewerAvatar, { backgroundColor: '#e1e1e1' }]}>
+          <Ionicons name="person" size={24} color="#8E8E93" />
+        </View>
+      )}
+      <View style={styles.reviewerInfo}>
+        <Text style={styles.reviewerName}>{item.user_name}</Text>
+        <View style={styles.reviewMeta}>
+          <RatingStars rating={item.rating} />
+          <Text style={styles.reviewDate}>
+            {new Date(item.created_at).toLocaleDateString()}
+          </Text>
+        </View>
+      </View>
+    </View>
+    <Text style={styles.reviewComment}>{item.comment}</Text>
+  </View>
+));
+
+const MenuItem = React.memo(({ item }: { item: MenuItem }) => {
+  const formattedPrice = useMemo(() => {
+    const price = typeof item.price === 'string' ? parseFloat(item.price) : item.price;
+    return price.toLocaleString('id-ID', {
+      style: 'currency',
+      currency: 'IDR',
+      minimumFractionDigits: 0
+    });
+  }, [item.price]);
+
+  return (
+    <View style={styles.menuItem}>
+      {item.image_url ? (
+        <Image 
+          source={{ uri: item.image_url }} 
+          style={styles.menuItemImage} 
+          resizeMode="cover"
+        />
+      ) : (
+        <View style={[styles.menuItemImage, styles.menuItemImagePlaceholder]}>
+          <Ionicons name="fast-food-outline" size={32} color="#8E8E93" />
+        </View>
+      )}
+      <View style={styles.menuItemDetails}>
+        <Text style={styles.menuItemName}>{item.name}</Text>
+        {item.description && (
+          <Text style={styles.menuItemDescription}>{item.description}</Text>
+        )}
+        <Text style={styles.menuItemPrice}>{formattedPrice}</Text>
+      </View>
+    </View>
+  );
+});
+
+// Main component
+export default function RestaurantProfileScreen() {
+  const params = useLocalSearchParams();
+  const router = useRouter();
+  
+  const [activeTab, setActiveTab] = useState<TabType>('about');
+  const [refreshing, setRefreshing] = useState(false);
+  
+  // Review modal state
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [reviewRating, setReviewRating] = useState(0);
+  const [reviewComment, setReviewComment] = useState('');
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+
+  // Get restaurant ID from params
+  const restaurantId = useMemo(() => {
+    const rawId = params.id || params.restaurantId;
+    return Array.isArray(rawId) ? rawId[0] : rawId;
+  }, [params.id, params.restaurantId]);
+
+  // Custom hooks
+  const { restaurant, actualRestaurantId, loading, error, fetchRestaurantData, setRestaurant } = useRestaurantData(restaurantId || '');
+  const { reviews, fetchReviews } = useReviews();
+  const { menuItems, fetchMenuItems } = useMenuItems();
+  const { isFollowing, followersCount, checkIfFollowing, fetchFollowersCount, toggleFollow } = useFollowStatus();
+
+  // Load initial data
+  useEffect(() => {
+    if (restaurantId && restaurantId !== 'undefined') {
+      loadData();
+    }
+  }, [restaurantId]);
+
+  const loadData = useCallback(async () => {
+    if (!restaurantId) return;
+    
+    try {
+      const actualId = await fetchRestaurantData(restaurantId);
+      
+      const [reviewsData] = await Promise.all([
+        fetchReviews(actualId),
+        fetchMenuItems(actualId),
+        fetchFollowersCount(actualId),
+        checkIfFollowing(actualId)
+      ]);
+
+      // Update restaurant with review data
+      setRestaurant(prev => prev ? {
+        ...prev,
+        average_rating: reviewsData.averageRating,
+        review_count: reviewsData.reviewCount
+      } : null);
+
+    } catch (error) {
+      console.error('Error loading data:', error);
+    }
+  }, [restaurantId, fetchRestaurantData, fetchReviews, fetchMenuItems, fetchFollowersCount, checkIfFollowing, setRestaurant]);
+
+  // Handlers
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadData();
+    setRefreshing(false);
+  }, [loadData]);
+
+  const handleFollow = useCallback(async () => {
+    if (!actualRestaurantId) return;
+    
+    const success = await toggleFollow(actualRestaurantId);
+    if (!success) {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        router.push('/login');
+      }
+    }
+  }, [actualRestaurantId, toggleFollow, router]);
+
+  const handleShare = useCallback(async () => {
     if (!restaurant) return;
 
     try {
@@ -255,59 +466,111 @@ const RestaurantProfileScreen = () => {
     } catch (error) {
       console.error('Error sharing restaurant:', error);
     }
-  };
+  }, [restaurant]);
 
-  const handleCall = () => {
+  const handleCall = useCallback(() => {
     if (!restaurant?.phone) return;
     Linking.openURL(`tel:${restaurant.phone}`);
-  };
+  }, [restaurant?.phone]);
 
-  const handleVisitWebsite = () => {
+  const handleVisitWebsite = useCallback(() => {
     if (!restaurant?.website) return;
     WebBrowser.openBrowserAsync(restaurant.website);
-  };
+  }, [restaurant?.website]);
 
-  const handleOpenMap = () => {
-    if (!restaurant?.latitude || !restaurant?.longitude) return;
+  const handleOpenMap = useCallback(() => {
+    if (!restaurant?.address) return;
     
-    const scheme = Platform.select({ ios: 'maps:0,0?q=', android: 'geo:0,0?q=' });
-    const latLng = `${restaurant.latitude},${restaurant.longitude}`;
-    const label = restaurant.name;
-    const url = Platform.select({
-      ios: `${scheme}${label}@${latLng}`,
-      android: `${scheme}${latLng}(${label})`
+    const query = encodeURIComponent(restaurant.address);
+    const scheme = Platform.select({ 
+      ios: `maps:0,0?q=${query}`, 
+      android: `geo:0,0?q=${query}` 
     });
 
-    if (url) Linking.openURL(url);
-  };
+    if (scheme) Linking.openURL(scheme);
+  }, [restaurant?.address]);
 
-  const handleAddReview = () => {
-    router.push({
-      pathname: '/restaurant/add-review',
-      params: { restaurantId: id }
-    });
-  };
+  const handleSubmitReview = useCallback(async () => {
+    if (!actualRestaurantId || reviewRating === 0) {
+      Alert.alert('Please select a rating');
+      return;
+    }
 
-  const renderRatingStars = (rating: number) => {
-    return (
-      <View style={styles.ratingContainer}>
-        {[1, 2, 3, 4, 5].map((star) => (
-          <Ionicons
-            key={star}
-            name={star <= rating ? 'star' : 'star-outline'}
-            size={16}
-            color="#FFD700"
-          />
-        ))}
-      </View>
-    );
-  };
+    setIsSubmittingReview(true);
+    
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        router.push('/login');
+        return;
+      }
 
-  const renderAboutTab = () => (
+      // Check if user already has a review
+      const { data: existingReview, error: fetchError } = await supabase
+        .from('reviews')
+        .select('id')
+        .eq('restaurant_id', actualRestaurantId)
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (fetchError) throw fetchError;
+
+      if (existingReview) {
+        // Update existing review
+        const { error } = await supabase
+          .from('reviews')
+          .update({
+            rating: reviewRating,
+            comment: reviewComment.trim() || null,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', existingReview.id);
+        
+        if (error) throw error;
+      } else {
+        // Create new review
+        const { error } = await supabase
+          .from('reviews')
+          .insert({
+            restaurant_id: actualRestaurantId,
+            user_id: user.id,
+            rating: reviewRating,
+            comment: reviewComment.trim() || null
+          });
+
+        if (error) throw error;
+      }
+
+      // Update restaurant's average rating
+      await supabase
+        .rpc('update_restaurant_rating', { restaurant_id: actualRestaurantId });
+
+      // Refresh reviews
+      const reviewsData = await fetchReviews(actualRestaurantId);
+      setRestaurant(prev => prev ? {
+        ...prev,
+        average_rating: reviewsData.averageRating,
+        review_count: reviewsData.reviewCount
+      } : null);
+
+      // Close modal and reset form
+      setShowReviewModal(false);
+      setReviewRating(0);
+      setReviewComment('');
+
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to submit review');
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  }, [actualRestaurantId, reviewRating, reviewComment, router, fetchReviews, setRestaurant]);
+
+  // Tab content renderers
+  const renderAboutTab = useCallback(() => (
     <View style={styles.tabContent}>
       <Text style={styles.sectionTitle}>About</Text>
       <Text style={styles.descriptionText}>{restaurant?.description}</Text>
-      
+
       <Text style={styles.sectionTitle}>Cuisine</Text>
       <View style={styles.cuisineContainer}>
         {restaurant?.cuisine_type?.map((cuisine, index) => (
@@ -341,27 +604,27 @@ const RestaurantProfileScreen = () => {
           {Object.entries(restaurant.hours).map(([day, hours]) => (
             <View key={day} style={styles.hoursRow}>
               <Text style={styles.hoursDay}>{day}</Text>
-              <Text style={styles.hoursTime}>{hours as string}</Text>
+              <Text style={styles.hoursTime}>{hours}</Text>
             </View>
           ))}
         </>
       )}
     </View>
-  );
+  ), [restaurant, handleCall, handleVisitWebsite, handleOpenMap]);
 
-  const renderReviewsTab = () => (
+  const renderReviewsTab = useCallback(() => (
     <View style={styles.tabContent}>
       <View style={styles.reviewsHeader}>
         <View style={styles.ratingSummary}>
           <Text style={styles.averageRating}>
             {restaurant?.average_rating?.toFixed(1) || '0.0'}
           </Text>
-          {renderRatingStars(restaurant?.average_rating || 0)}
+          <RatingStars rating={restaurant?.average_rating || 0} />
           <Text style={styles.reviewCount}>
             {restaurant?.review_count || 0} reviews
           </Text>
         </View>
-        <TouchableOpacity style={styles.addReviewButton} onPress={handleAddReview}>
+        <TouchableOpacity style={styles.addReviewButton} onPress={() => setShowReviewModal(true)}>
           <Ionicons name="create-outline" size={20} color="white" />
           <Text style={styles.addReviewButtonText}>Add Review</Text>
         </TouchableOpacity>
@@ -370,67 +633,38 @@ const RestaurantProfileScreen = () => {
       {reviews.length > 0 ? (
         <FlatList
           data={reviews}
-          renderItem={({ item }) => (
-            <View style={styles.reviewItem}>
-              <View style={styles.reviewHeader}>
-                <Image
-                  source={{ uri: item.user_avatar || 'https://via.placeholder.com/150' }}
-                  style={styles.reviewerAvatar}
-                />
-                <View style={styles.reviewerInfo}>
-                  <Text style={styles.reviewerName}>{item.user_name}</Text>
-                  <View style={styles.reviewMeta}>
-                    {renderRatingStars(item.rating)}
-                    <Text style={styles.reviewDate}>
-                      {new Date(item.created_at).toLocaleDateString()}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-              <Text style={styles.reviewComment}>{item.comment}</Text>
-            </View>
-          )}
+          renderItem={({ item }) => <ReviewItem item={item} />}
           keyExtractor={(item) => item.id}
           scrollEnabled={false}
+          removeClippedSubviews={true}
+          maxToRenderPerBatch={10}
+          windowSize={10}
         />
       ) : (
         <View style={styles.emptyReviews}>
           <Ionicons name="restaurant-outline" size={48} color="#8E8E93" />
           <Text style={styles.emptyReviewsText}>No reviews yet</Text>
           <Text style={styles.emptyReviewsSubtext}>Be the first to review this restaurant</Text>
-          <TouchableOpacity style={styles.addReviewButton} onPress={handleAddReview}>
+          <TouchableOpacity style={styles.addReviewButton} onPress={() => setShowReviewModal(true)}>
             <Ionicons name="create-outline" size={20} color="white" />
             <Text style={styles.addReviewButtonText}>Add Review</Text>
           </TouchableOpacity>
         </View>
       )}
     </View>
-  );
+  ), [restaurant, reviews]);
 
-  const renderMenuTab = () => (
+  const renderMenuTab = useCallback(() => (
     <View style={styles.tabContent}>
       {menuItems.length > 0 ? (
         <FlatList
           data={menuItems}
-          renderItem={({ item }) => (
-            <View style={styles.menuItem}>
-              {item.image_url && (
-                <Image
-                  source={{ uri: item.image_url }}
-                  style={styles.menuItemImage}
-                />
-              )}
-              <View style={styles.menuItemDetails}>
-                <Text style={styles.menuItemName}>{item.name}</Text>
-                {item.description && (
-                  <Text style={styles.menuItemDescription}>{item.description}</Text>
-                )}
-                <Text style={styles.menuItemPrice}>${item.price.toFixed(2)}</Text>
-              </View>
-            </View>
-          )}
+          renderItem={({ item }) => <MenuItem item={item} />}
           keyExtractor={(item) => item.id}
           scrollEnabled={false}
+          removeClippedSubviews={true}
+          maxToRenderPerBatch={10}
+          windowSize={10}
         />
       ) : (
         <View style={styles.emptyMenu}>
@@ -440,39 +674,24 @@ const RestaurantProfileScreen = () => {
         </View>
       )}
     </View>
-  );
+  ), [menuItems]);
 
-  const renderMapTab = () => (
+  const renderMapTab = useCallback(() => (
     <View style={styles.tabContent}>
-      {restaurant?.latitude && restaurant?.longitude ? (
-        <MapView
-          style={styles.map}
-          initialRegion={{
-            latitude: restaurant.latitude,
-            longitude: restaurant.longitude,
-            latitudeDelta: 0.01,
-            longitudeDelta: 0.01,
-          }}
-        >
-          <Marker
-            coordinate={{
-              latitude: restaurant.latitude,
-              longitude: restaurant.longitude,
-            }}
-            title={restaurant.name}
-            description={restaurant.address}
-          />
-        </MapView>
-      ) : (
-        <View style={styles.emptyMap}>
-          <Ionicons name="map-outline" size={48} color="#8E8E93" />
-          <Text style={styles.emptyMapText}>Location not available</Text>
-        </View>
-      )}
+      <View style={styles.emptyMap}>
+        <Ionicons name="map-outline" size={48} color="#8E8E93" />
+        <Text style={styles.emptyMapText}>Map integration requires address or coordinates</Text>
+        <Text style={styles.emptyMapSubtext}>Use the address to search in maps</Text>
+        {restaurant?.address && (
+          <TouchableOpacity style={styles.mapButton} onPress={handleOpenMap}>
+            <Text style={styles.mapButtonText}>Open in Maps</Text>
+          </TouchableOpacity>
+        )}
+      </View>
     </View>
-  );
+  ), [restaurant?.address, handleOpenMap]);
 
-  const renderTabContent = () => {
+  const renderTabContent = useCallback(() => {
     switch (activeTab) {
       case 'about':
         return renderAboutTab();
@@ -485,185 +704,197 @@ const RestaurantProfileScreen = () => {
       default:
         return null;
     }
-  };
+  }, [activeTab, renderAboutTab, renderReviewsTab, renderMenuTab, renderMapTab]);
 
-  if (loading && !restaurant) {
+  // Loading state
+  if (loading) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color="#007AFF" />
+        <Text style={styles.loadingText}>Loading restaurant...</Text>
       </View>
     );
   }
 
-  if (!restaurant) {
+  // Error state
+  if (error || !restaurant) {
     return (
       <View style={styles.errorContainer}>
-        <Text style={styles.errorText}>Restaurant not found</Text>
+        <Ionicons name="warning-outline" size={48} color="#FF3B30" />
+        <Text style={styles.errorText}>
+          {error || 'Restaurant not found'}
+        </Text>
+        <Text style={styles.errorSubtext}>
+          ID: {restaurantId || 'No ID provided'}
+        </Text>
+        <TouchableOpacity 
+          style={styles.retryButton}
+          onPress={loadData}
+        >
+          <Text style={styles.retryButtonText}>Try Again</Text>
+        </TouchableOpacity>
       </View>
     );
   }
 
+  // Main render
   return (
-    <ScrollView
-      style={styles.container}
-      refreshControl={
-        <RefreshControl
-          refreshing={refreshing}
-          onRefresh={() => {
-            setRefreshing(true);
-            fetchRestaurantData();
-          }}
-        />
-      }
-    >
-      {/* Cover Image */}
-      <View style={styles.coverContainer}>
-        {restaurant.cover_image_url ? (
-          <Image
-            source={{ uri: restaurant.cover_image_url }}
-            style={styles.coverImage}
-          />
-        ) : (
-          <View style={[styles.coverImage, styles.coverPlaceholder]}>
-            <Ionicons name="restaurant" size={64} color="white" />
-          </View>
-        )}
-      </View>
-
-      {/* Restaurant Header */}
-      <View style={styles.header}>
-        <View style={styles.avatarContainer}>
+    <View style={styles.container}>
+      <ScrollView
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
+        }
+      >
+        {/* Cover Image */}
+        <View style={styles.coverContainer}>
           {restaurant.image_url ? (
             <Image
               source={{ uri: restaurant.image_url }}
-              style={styles.avatar}
+              style={styles.coverImage}
             />
           ) : (
-            <View style={[styles.avatar, styles.avatarPlaceholder]}>
-              <Ionicons name="restaurant" size={40} color="white" />
+            <View style={[styles.coverImage, styles.coverPlaceholder]}>
+              <Ionicons name="restaurant" size={64} color="white" />
             </View>
           )}
         </View>
 
-        <View style={styles.headerInfo}>
-          <Text style={styles.name}>{restaurant.name}</Text>
-          <View style={styles.ratingRow}>
-            {renderRatingStars(restaurant.average_rating || 0)}
-            <Text style={styles.ratingText}>
-              {restaurant.average_rating?.toFixed(1) || '0.0'} ({restaurant.review_count || 0})
-            </Text>
+        {/* Restaurant Header */}
+        <View style={styles.header}>
+          <View style={styles.avatarContainer}>
+            {restaurant.image_url ? (
+              <Image
+                source={{ uri: restaurant.image_url }}
+                style={styles.avatar}
+              />
+            ) : (
+              <View style={[styles.avatar, styles.avatarPlaceholder]}>
+                <Ionicons name="restaurant" size={40} color="white" />
+              </View>
+            )}
           </View>
-          <Text style={styles.address}>{restaurant.address}</Text>
-          <Text style={styles.followersText}>{followersCount} followers</Text>
+
+          <View style={styles.headerInfo}>
+            <Text style={styles.name}>{restaurant.name}</Text>
+            <View style={styles.ratingRow}>
+              <RatingStars rating={restaurant.average_rating || 0} />
+              <Text style={styles.ratingText}>
+                {restaurant.average_rating?.toFixed(1) || '0.0'} ({restaurant.review_count || 0})
+              </Text>
+            </View>
+            <Text style={styles.address}>{restaurant.address}</Text>
+            <Text style={styles.followersText}>{followersCount} followers</Text>
+          </View>
+
+          <View style={styles.actionButtons}>
+            <TouchableOpacity style={styles.followButton} onPress={handleFollow}>
+              <Ionicons
+                name={isFollowing ? 'heart' : 'heart-outline'}
+                size={20}
+                color={isFollowing ? 'red' : 'white'}
+              />
+              <Text style={styles.followButtonText}>
+                {isFollowing ? 'Following' : 'Follow'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.shareButton} onPress={handleShare}>
+              <Ionicons name="share-outline" size={20} color="#007AFF" />
+            </TouchableOpacity>
+          </View>
         </View>
 
-        <View style={styles.actionButtons}>
-          <TouchableOpacity style={styles.followButton} onPress={handleFollow}>
-            <Ionicons
-              name={isFollowing ? 'heart' : 'heart-outline'}
-              size={20}
-              color={isFollowing ? 'red' : 'white'}
-            />
-            <Text style={styles.followButtonText}>
-              {isFollowing ? 'Following' : 'Follow'}
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.shareButton} onPress={handleShare}>
-            <Ionicons name="share-outline" size={20} color="#007AFF" />
-          </TouchableOpacity>
+        {/* Tabs */}
+        <View style={styles.tabsContainer}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.tabsScroll}
+          >
+            {[
+              { key: 'about', label: 'About', icon: 'information-circle-outline' },
+              { key: 'reviews', label: 'Reviews', icon: 'star-outline' },
+              { key: 'menu', label: 'Menu', icon: 'fast-food-outline' },
+              { key: 'map', label: 'Map', icon: 'map-outline' }
+            ].map((tab) => (
+              <TouchableOpacity
+                key={tab.key}
+                style={[styles.tab, activeTab === tab.key && styles.activeTab]}
+                onPress={() => setActiveTab(tab.key as TabType)}
+              >
+                <Ionicons
+                  name={tab.icon as any}
+                  size={20}
+                  color={activeTab === tab.key ? '#007AFF' : '#8E8E93'}
+                />
+                <Text
+                  style={[
+                    styles.tabText,
+                    activeTab === tab.key && styles.activeTabText,
+                  ]}
+                >
+                  {tab.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
         </View>
-      </View>
 
-      {/* Tabs */}
-      <View style={styles.tabsContainer}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.tabsScroll}
-        >
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'about' && styles.activeTab]}
-            onPress={() => setActiveTab('about')}
-          >
-            <Ionicons
-              name="information-circle-outline"
-              size={20}
-              color={activeTab === 'about' ? '#007AFF' : '#8E8E93'}
+        {/* Tab Content */}
+        {renderTabContent()}
+      </ScrollView>
+
+      {/* Review Modal */}
+      <Modal
+        animationType={Platform.OS === 'ios' ? 'slide' : 'fade'}
+        transparent={true}
+        visible={showReviewModal}
+        onRequestClose={() => setShowReviewModal(false)}
+      >
+        <View style={styles.centeredView}>
+          <View style={styles.modalView}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Add Your Review</Text>
+              <Pressable onPress={() => setShowReviewModal(false)}>
+                <Ionicons name="close" size={24} color="#8E8E93" />
+              </Pressable>
+            </View>
+
+            <RatingStars 
+              rating={reviewRating} 
+              size={40} 
+              interactive={true} 
+              onPress={setReviewRating} 
             />
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === 'about' && styles.activeTabText,
-              ]}
-            >
-              About
-            </Text>
-          </TouchableOpacity>
 
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'reviews' && styles.activeTab]}
-            onPress={() => setActiveTab('reviews')}
-          >
-            <Ionicons
-              name="star-outline"
-              size={20}
-              color={activeTab === 'reviews' ? '#007AFF' : '#8E8E93'}
+            <Text style={styles.modalLabel}>Your Review</Text>
+            <TextInput
+              style={styles.modalInput}
+              multiline
+              numberOfLines={4}
+              placeholder="Share your experience..."
+              value={reviewComment}
+              onChangeText={setReviewComment}
+              placeholderTextColor="#999"
             />
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === 'reviews' && styles.activeTabText,
-              ]}
-            >
-              Reviews
-            </Text>
-          </TouchableOpacity>
 
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'menu' && styles.activeTab]}
-            onPress={() => setActiveTab('menu')}
-          >
-            <Ionicons
-              name="fast-food-outline"
-              size={20}
-              color={activeTab === 'menu' ? '#007AFF' : '#8E8E93'}
-            />
-            <Text
+            <TouchableOpacity
               style={[
-                styles.tabText,
-                activeTab === 'menu' && styles.activeTabText,
+                styles.modalSubmitButton,
+                isSubmittingReview && styles.modalSubmitButtonDisabled
               ]}
+              onPress={handleSubmitReview}
+              disabled={isSubmittingReview}
             >
-              Menu
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'map' && styles.activeTab]}
-            onPress={() => setActiveTab('map')}
-          >
-            <Ionicons
-              name="map-outline"
-              size={20}
-              color={activeTab === 'map' ? '#007AFF' : '#8E8E93'}
-            />
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === 'map' && styles.activeTabText,
-              ]}
-            >
-              Map
-            </Text>
-          </TouchableOpacity>
-        </ScrollView>
-      </View>
-
-      {/* Tab Content */}
-      {renderTabContent()}
-    </ScrollView>
+              <Text style={styles.modalSubmitButtonText}>
+                {isSubmittingReview ? 'Submitting...' : 'Submit Review'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+    </View>
   );
-};
+}
 
 const styles = StyleSheet.create({
   container: {
@@ -674,15 +905,40 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    gap: 16,
+  },
+  loadingText: {
+    fontSize: 16,
+    color: '#8E8E93',
   },
   errorContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 20,
+    gap: 16,
   },
   errorText: {
-    fontSize: 18,
+    fontSize: 20,
+    fontWeight: '600',
+    color: '#FF3B30',
+    textAlign: 'center',
+  },
+  errorSubtext: {
+    fontSize: 14,
     color: '#8E8E93',
+    textAlign: 'center',
+  },
+  retryButton: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 8,
+  },
+  retryButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '600',
   },
   coverContainer: {
     height: COVER_HEIGHT,
@@ -971,6 +1227,11 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginRight: 16,
   },
+  menuItemImagePlaceholder: {
+    backgroundColor: '#f0f0f0',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   menuItemDetails: {
     flex: 1,
   },
@@ -1006,11 +1267,6 @@ const styles = StyleSheet.create({
     color: '#8E8E93',
     marginTop: 8,
   },
-  map: {
-    width: '100%',
-    height: 300,
-    borderRadius: 12,
-  },
   emptyMap: {
     alignItems: 'center',
     paddingVertical: 40,
@@ -1020,7 +1276,85 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#1C1C1E',
     marginTop: 16,
+    textAlign: 'center',
+  },
+  emptyMapSubtext: {
+    fontSize: 14,
+    color: '#8E8E93',
+    marginTop: 8,
+    textAlign: 'center',
+  },
+  mapButton: {
+    marginTop: 16,
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 8,
+  },
+  mapButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  centeredView: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  modalView: {
+    width: '90%',
+    backgroundColor: 'white',
+    borderRadius: 12,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#1C1C1E',
+  },
+  modalLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1C1C1E',
+    marginBottom: 8,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+    borderRadius: 8,
+    padding: 12,
+    minHeight: 100,
+    textAlignVertical: 'top',
+    marginBottom: 20,
+    fontSize: 15,
+  },
+  modalSubmitButton: {
+    backgroundColor: '#007AFF',
+    padding: 15,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  modalSubmitButtonDisabled: {
+    backgroundColor: '#A7C7FF',
+  },
+  modalSubmitButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });
-
-export default RestaurantProfileScreen;
